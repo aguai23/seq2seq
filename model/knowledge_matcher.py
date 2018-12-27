@@ -162,6 +162,7 @@ class KnowledgeMatcher(object):
                                    reuse=tf.AUTO_REUSE)
           logits = tf.one_hot(tf.argmax(logits, axis=2), depth=len(self.vocab))
           input_sequence = tf.concat([initial_character, logits], axis=1)
+          # print(input_sequence)
         final_logits = tf.argmax(logits, axis=2)
         # print(final_logits)
         answers.append(final_logits)
@@ -455,7 +456,9 @@ class KnowledgeMatcher(object):
     # print(output_logits)
     generation_loss = []
     for (output_logit, output_label, output_mask) in zip(output_logits, output_labels, output_masks):
-      sentence_loss = tf.nn.softmax_cross_entropy_with_logits(logits=output_logit, labels=output_label)
+      # sentence_loss = tf.nn.softmax_cross_entropy_with_logits(logits=output_logit, labels=output_label)
+      output_logit = tf.nn.softmax(output_logit, axis=-1)
+      sentence_loss = tf.reduce_sum(-output_label * ((1 - output_logit) ** 2) * tf.log(output_logit), axis=-1)
       sentence_loss = tf.multiply(sentence_loss, output_mask)
       generation_loss.append(tf.reduce_mean(sentence_loss, axis=1))
 
@@ -464,7 +467,7 @@ class KnowledgeMatcher(object):
     generation_loss = tf.multiply(generation_loss, self.answer_mask)
     generation_loss = tf.reduce_mean(generation_loss)
 
-    loss = match_loss + stop_loss + generation_loss
+    loss = stop_loss + generation_loss
     return loss
 
 

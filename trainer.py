@@ -90,14 +90,14 @@ class Trainer(object):
 
       for epoch in range(train_epoch):
 
-        for step in range(100):
+        for step in range(step_size):
 
           start_index = self.batch_size * step
           end_index = self.batch_size * (step + 1)
 
-          _, loss = sess.run([self.optimizer,
-                              self.network.cost],
-                             feed_dict={
+          _, loss, answers, labels = sess.run([self.optimizer,
+                              self.network.cost, self.network.output_logits, self.network.output_labels],
+                              feed_dict={
                                self.network.question: question[start_index: end_index],
                                self.network.answer: answer[start_index: end_index],
                                self.network.answer_mask: answer_mask[
@@ -109,6 +109,8 @@ class Trainer(object):
             logging.info("epoch {:}, step {:}, Minibatch Loss={:.4f}".format(epoch,
                                                                              step,
                                                                              loss))
+            print(np.argmax(answers[0][0], axis=-1))
+            print(np.argmax(labels[0][0], axis=-1))
 
         if epoch % save_epoch == 0:
           saver = tf.train.Saver()
@@ -169,4 +171,4 @@ if __name__ == "__main__":
   knowledge_matcher = KnowledgeMatcher(knowledge_tree, vocab)
   data_processor = DataProcessor("./data/diabetes.json", data_dir="./data/", vocab="./data/vocab.json")
   trainer = Trainer(knowledge_matcher, data_processor)
-  trainer.train(train_epoch=1, restore=True)
+  trainer.train(train_epoch=10, restore=True)

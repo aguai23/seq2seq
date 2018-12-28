@@ -21,6 +21,8 @@ class DataProcessor(object):
 
     self.start_token = None
     self.end_token = None
+    self.unknown_token = None
+    self.padding_token = None
 
     if qa_file is None:
       self.train_data = json.load(open(train_file, "r"))
@@ -58,9 +60,44 @@ class DataProcessor(object):
     self.raw_valid_data = self.valid_data
     self.raw_test_data = self.test_data
 
+    self.encode_vocab, self.decode_vocab = self.build_vocab()
     self.train_data = self.convert_to_embedding(self.train_data)
     self.valid_data = self.convert_to_embedding(self.valid_data)
     self.test_data = self.convert_to_embedding(self.test_data)
+
+    self.vocab_embedding = self.build_vocab_embedding()
+    print(self.vocab_embedding.shape)
+
+  def build_vocab_embedding(self):
+
+    vocab_embedding = []
+    vocab_embedding.append(self.padding_token)
+    vocab_embedding.append(self.unknown_token)
+    vocab_embedding.append(self.start_token)
+    vocab_embedding.append(self.end_token)
+    for index in range(4, len(self.encode_vocab) + 1):
+      vocab_embedding.append(self.word2vec[self.decode_vocab[index]])
+    return np.asarray(vocab_embedding)
+
+  def build_vocab(self):
+    encode_vocab = {}
+    decode_vocab = {}
+    encode_vocab["unk"] = 1
+    encode_vocab["<start>"] = 2
+    encode_vocab["<end>"] = 3
+    decode_vocab[1] = "unk"
+    decode_vocab[2] = "<start>"
+    decode_vocab[3] = "<end>"
+
+    index = 4
+    for qa_pair in self.train_data + self.valid_data + self.test_data:
+      for token in qa_pair["question"] + qa_pair["answer"]:
+        if token not in encode_vocab:
+          encode_vocab[token] = index
+          decode_vocab[index] = token
+          index += 1
+    print("vocab size " + str(len(encode_vocab)))
+    return encode_vocab, decode_vocab
 
   def get_train_data(self):
     return self.train_data
@@ -75,8 +112,11 @@ class DataProcessor(object):
     padding_token = np.zeros(self.embedding_size)
     start_token = np.zeros(self.embedding_size)
     end_token = np.zeros(self.embedding_size)
+    unknown_token = np.zeros(self.embedding_size)
     start_token[0] = 1
     end_token[-1] = 1
+    unknown_token[0] = 1
+    unknown_token[-1] = 1
 
     data_embedding = []
     for qa_pair in data:
@@ -95,15 +135,19 @@ class DataProcessor(object):
         question_embedding.append(padding_token)
 
       answer_embedding = [start_token]
+      answer_label = []
       for token in answer:
         answer_embedding.append(self.word2vec[token])
-
+        answer_label.append(self.encode_vocab[token])
       token_mask = np.zeros(self.max_answer_token)
       token_mask[:len(answer_embedding)] = 1
 
       answer_embedding.append(end_token)
       while len(answer_embedding) < self.max_answer_token:
         answer_embedding.append(padding_token)
+
+      while len(answer_label) < self.max_answer_token:
+        answer_label.append(0)
 
       question_embedding = np.asarray(question_embedding)
       answer_embedding = np.asarray(answer_embedding)
@@ -113,22 +157,28 @@ class DataProcessor(object):
 
       data_embedding.append({"question": question_embedding,
                              "answer": answer_embedding,
-                             "answer_mask": token_mask})
+                             "answer_mask": token_mask,
+                             "answer_label": answer_label})
 
     self.start_token = start_token
     self.end_token = end_token
+    self.unknown_token = unknown_token
+    self.padding_token = padding_token
 
     question_embedding = []
     answer_embedding = []
     mask_embedding = []
+    label_embedding = []
     for data_item in data_embedding:
       question_embedding.append(data_item["question"])
       answer_embedding.append(data_item["answer"])
       mask_embedding.append(data_item["answer_mask"])
+      label_embedding.append(data_item["answer_label"])
     return {
       "question": np.asarray(question_embedding),
       "answer": np.asarray(answer_embedding),
-      "answer_mask": np.asarray(mask_embedding)
+      "answer_mask": np.asarray(mask_embedding),
+      "answer_label": np.asarray(label_embedding)
     }
 
   def process_data(self, train_percent):
@@ -170,8 +220,8 @@ class DataProcessor(object):
       json.dump(self.test_data, f, ensure_ascii=False)
 
   def clean_string(self, string):
-    characters_to_remove = {"，", "。", "？", "！", "》", "、", "\r", "%", "&", "*", "…", "（",
-                            "@", "#", "￥", "）", ".", ",", " ", "?", "/", "`", "~", ":"}
+    characters_to_remove = {"？", "！", "》", "、", "\r", "%", "&", "*", "…", "（",
+                            "@", "#", "￥", "）", ".", ",", " ", "?", "/", "`", "~"}
 
     clean_string = "".join(c for c in string if c not in characters_to_remove)
     tokens = list(jieba.cut(clean_string))
@@ -191,4 +241,4 @@ class DataProcessor(object):
 
 if __name__ == "__main__":
   data_processor = DataProcessor("./data/QA_data/varicocele/", "./data/QA_data/varicocele/varicocele.json",
-                                 word2vec="./data/word2vec/varicocele")
+                                 train_word2vec=True)

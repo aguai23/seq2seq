@@ -9,13 +9,15 @@ import numpy as np
 from scipy import spatial
 from evaluator import Evaluator
 import jieba
+from sklearn.utils import shuffle
+
 logging.basicConfig(level=logging.INFO, format='%(asctime)s %(message)s')
 
 
 class Trainer(object):
 
   def __init__(self, network, data_provider, batch_size=16, optimizer="adam", learning_rate=5e-5,
-               decay_rate=1, decay_step=1000, momentum=0.9, verify_epoch=1, output_path="./saved_model/"):
+               decay_rate=0.9, decay_step=1000, momentum=0.9, verify_epoch=1, output_path="./saved_model/"):
     # network class
     self.network = network
 
@@ -62,6 +64,7 @@ class Trainer(object):
     question = train_data["question"]
     answer = train_data["answer"]
     answer_mask = train_data["answer_mask"]
+    answer_label = train_data["answer_label"]
 
     train_samples = question.shape[0]
     print("total training numbers " + str(train_samples))
@@ -79,35 +82,59 @@ class Trainer(object):
       print("--------------start training -----------------------")
       print("total training epochs " + str(train_epoch))
 
+      summary_writer = tf.summary.FileWriter(self.output_path, graph=sess.graph)
+      start_epoch = 0
       if restore:
         ckpt = tf.train.get_checkpoint_state(self.output_path)
         if ckpt and ckpt.model_checkpoint_path:
           saver = tf.train.Saver()
           saver.restore(sess, ckpt.model_checkpoint_path)
           logging.info("model restored from file " + ckpt.model_checkpoint_path)
+          start_epoch = int(ckpt.model_checkpoint_path.split("_")[2])
 
-      for epoch in range(train_epoch):
+      for epoch in range(start_epoch + 1, train_epoch):
 
         for step in range(step_size):
 
           start_index = self.batch_size * step
           end_index = self.batch_size * (step + 1)
 
-          _, loss, answers = sess.run([self.optimizer,
-                                       self.network.cost, self.network.outputs],
-                                      feed_dict={
-                                        self.network.question: question[start_index: end_index],
-                                        self.network.answer: answer[start_index: end_index],
-                                        self.network.answer_mask: answer_mask[
-                                                                  start_index: end_index]
-                                      })
+          _ = sess.run(self.optimizer,
+                       feed_dict={
+                         self.network.question: question[start_index: end_index],
+                         self.network.answer: answer[start_index: end_index],
+                         self.network.answer_mask: answer_mask[
+                                                   start_index: end_index],
+                         self.network.answer_label: answer_label[start_index: end_index]
+                       })
 
           if step % display_step == 0:
+
+            loss, infer_answers, answers = sess.run([self.network.cost, self.network.infer_outputs,
+                                                     self.network.output_tokens],
+                                                    feed_dict={
+                                                      self.network.question: question[start_index: end_index],
+                                                      self.network.answer: answer[start_index: end_index],
+                                                      self.network.answer_mask: answer_mask[
+                                                                                start_index: end_index],
+                                                      self.network.answer_label: answer_label[start_index: end_index]
+                                                    })
             logging.info("epoch {:}, step {:}, Minibatch Loss={:.4f}".format(epoch,
                                                                              step,
                                                                              loss))
+            summary = tf.Summary()
+            summary.value.add(tag="train_loss", simple_value=loss)
+            summary_writer.add_summary(summary, epoch * step_size + step)
+            summary_writer.flush()
+            # decoded_labels = self.decode_answer(answer_label[start_index: end_index])
             # decode_answers = self.decode_answer(answers)
+            # decode_infers = self.decode_answer(infer_answers)
             # print(decode_answers[0])
+            # print(decode_infers[0])
+            # print(decoded_labels[0])
+
+        # shuffle data
+        question, answer, answer_mask, answer_label = shuffle(question, answer, answer_mask, answer_label)
 
         if epoch % save_epoch == 0:
           saver = tf.train.Saver()
@@ -120,6 +147,7 @@ class Trainer(object):
           valid_question = valid_data["question"]
           valid_answer = valid_data["answer"]
           valid_answer_mask = valid_data["answer_mask"]
+          valid_answer_label = valid_data["answer_label"]
 
           raw_valid_data = data_processor.get_raw_valid()
 
@@ -133,17 +161,41 @@ class Trainer(object):
                                      feed_dict={
                                        self.network.question: valid_question[start_index: end_index],
                                        self.network.answer: valid_answer[start_index: end_index],
-                                       self.network.answer_mask: valid_answer_mask[start_index: end_index]
+                                       self.network.answer_mask: valid_answer_mask[start_index: end_index],
+                                       self.network.answer_label: valid_answer_label[start_index: end_index]
                                      })
             decoded_answers = self.decode_answer(outputs)
 
             raw_valid_seg = raw_valid_data[start_index: end_index]
+
+            if step == 0 or step == 5:
+             print("---------question----------")
+             print("".join(raw_valid_data[start_index]["question"]))
+             print("--------model output------------")
+             print("".join(decoded_answers[0]))
+             print("-------ground truth----------")
+             decoded_label = self.decode_answer(valid_answer_label[start_index: end_index])
+             print("".join(decoded_label[0]))
+
             for decoded_answer, raw_valid in zip(decoded_answers, raw_valid_seg):
-              blue_score = evaluator.calculate_bleu(decoded_answer, raw_valid["answer"])
+              evaluator.calculate_bleu(decoded_answer, raw_valid["answer"])
             total_loss += loss
           logging.info("loss on valid data " + str(total_loss / valid_step))
-          avg_bleu = evaluator.average_bleu()
-          logging.info("bleu score " + str(avg_bleu))
+          avg_bleu_1, avg_bleu_2, avg_bleu_3, avg_bleu_4 = evaluator.average_bleu()
+
+          logging.info("bleu score 1 " + str(avg_bleu_1))
+          logging.info("bleu score 2 " + str(avg_bleu_2))
+          logging.info("bleu score 3 " + str(avg_bleu_3))
+          logging.info("bleu score 4 " + str(avg_bleu_4))
+
+          valid_summary = tf.Summary()
+          valid_summary.value.add(tag="valid_loss", simple_value=(total_loss / valid_step))
+          valid_summary.value.add(tag="bleu_1", simple_value=avg_bleu_1)
+          valid_summary.value.add(tag="bleu_2", simple_value=avg_bleu_2)
+          valid_summary.value.add(tag="bleu_3", simple_value=avg_bleu_3)
+          valid_summary.value.add(tag="bleu_4", simple_value=avg_bleu_4)
+          summary_writer.add_summary(valid_summary, epoch)
+          summary_writer.flush()
 
   def decode_answer(self, answers):
 
@@ -151,15 +203,14 @@ class Trainer(object):
 
     for answer in answers:
       decode_answer = []
-      for token in answer:
-        decode_token = self.data_provider.word2vec.most_similar(positive=[token], negative=[], topn=1)
-
-        top_sim = decode_token[0][1]
-        end_sim = 1 - spatial.distance.cosine(token, data_processor.end_token)
-        if end_sim > top_sim:
+      for token_id in answer:
+        if token_id == 0:
+          token = "<pad>"
+        else:
+          token = self.data_provider.decode_vocab[token_id]
+        if token == "<end>" or token == "<pad>":
           break
-
-        decode_answer.append(decode_token[0][0])
+        decode_answer.append(token)
       decode_answers.append(decode_answer)
 
     return decode_answers
@@ -168,6 +219,6 @@ class Trainer(object):
 if __name__ == "__main__":
   data_processor = DataProcessor("./data/QA_data/varicocele/", "./data/QA_data/varicocele/varicocele.json",
                                  word2vec="./data/word2vec/varicocele")
-  model = Seq2Seq(data_processor.start_token)
-  trainer = Trainer(model, data_processor)
-  trainer.train(train_epoch=100, save_epoch=10, display_step=50)
+  model = Seq2Seq(data_processor.start_token, data_processor.vocab_embedding)
+  trainer = Trainer(model, data_processor, learning_rate=5e-3, batch_size=8)
+  trainer.train(train_epoch=100, save_epoch=10, display_step=100, restore=True)

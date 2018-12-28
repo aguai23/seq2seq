@@ -1,45 +1,66 @@
 import json
 import jieba
 from random import shuffle
+import gensim
 import numpy as np
+import re
 
 
 class DataProcessor(object):
 
-  def __init__(self, data_file, process_data=True, data_dir=None, train_percent=0.8, vocab=None,
-               max_sequence=30, max_answers=5):
-    # original qa data
-    self.data_file = data_file
-
+  def __init__(self, data_dir, qa_file=None, train_file=None, valid_file=None, test_file=None, word2vec=None,
+               train_percent=0.8, train_word2vec=False, max_question_token=30, max_answer_token=100, embedding_size=100):
+    self.data_dir = data_dir
     self.train_data = None
     self.valid_data = None
     self.test_data = None
 
-    self.data_dir = data_dir
-    self.vocab = vocab
+    self.max_question_token = max_question_token
+    self.max_answer_token = max_answer_token
+    self.embedding_size = embedding_size
 
-    self.max_sequence = max_sequence
-    self.max_answers = max_answers
+    self.start_token = None
+    self.end_token = None
 
-    if process_data:
-      self.process_data(train_percent)
+    if qa_file is None:
+      self.train_data = json.load(open(train_file, "r"))
+      self.valid_data = json.load(open(valid_file, "r"))
+      self.test_data = json.load(open(test_file, "r"))
     else:
-      self.train_data = json.load(open(self.data_dir + "train.json", "r"))
-      self.valid_data = json.load(open(self.data_dir + "valid.json", "r"))
-      self.test_data = json.load(open(self.data_dir + "test.json", "r"))
+      self.qa_file = qa_file
+      self.process_data(train_percent)
 
     print("training number " + str(len(self.train_data)))
     print("valid number " + str(len(self.valid_data)))
     print("test number " + str(len(self.test_data)))
 
-    self.data_text = self.train_data + self.valid_data + self.test_data
+    if word2vec:
+      self.word2vec = gensim.models.Word2Vec.load(word2vec)
+      # print(self.word2vec["血管"])
+      # print(self.word2vec.most_similar(positive=[self.word2vec["血管"]],negative=[], topn=1))
+    else:
+      if train_word2vec:
+        document = []
+        for qa_pair in self.train_data + self.valid_data + self.test_data:
+          document.append(qa_pair["question"])
+          document.append(qa_pair["answer"])
+        model = gensim.models.word2vec.Word2Vec(
+          document,
+          size=embedding_size,
+          window=5,
+          min_count=1,
+          workers=3
+        )
+        model.train(document, total_examples=len(document), epochs=30)
+        model.save("./data/word2vec/varicocele")
+        self.word2vec = model
 
-    self.train_data = self.convert_to_feature(self.train_data)
-    print(self.train_data["question"].shape)
-    print(self.train_data["answer"].shape)
-    print(self.train_data["answer_mask"].shape)
-    print(self.train_data["stop_label"].shape)
-    self.valid_data = self.convert_to_feature(self.valid_data)
+    self.raw_valid_data = self.valid_data
+    self.raw_test_data = self.test_data
+
+    self.train_data = self.convert_to_embedding(self.train_data)
+    self.valid_data = self.convert_to_embedding(self.valid_data)
+    self.test_data = self.convert_to_embedding(self.test_data)
 
   def get_train_data(self):
     return self.train_data
@@ -47,11 +68,89 @@ class DataProcessor(object):
   def get_valid_data(self):
     return self.valid_data
 
-  def process_data(self, train_percent):
+  def get_raw_valid(self):
+    return self.raw_valid_data
 
-    qa_pairs = json.load(open(self.data_file, "r"))
+  def convert_to_embedding(self, data):
+    padding_token = np.zeros(self.embedding_size)
+    start_token = np.zeros(self.embedding_size)
+    end_token = np.zeros(self.embedding_size)
+    start_token[0] = 1
+    end_token[-1] = 1
+
+    data_embedding = []
+    for qa_pair in data:
+      question = qa_pair["question"]
+      answer = qa_pair["answer"]
+      if len(question) > self.max_question_token:
+        question = question[:self.max_question_token]
+
+      if len(answer) > self.max_answer_token - 2:
+        answer = answer[:self.max_answer_token - 2]
+
+      question_embedding = []
+      for token in question:
+        question_embedding.append(self.word2vec[token])
+      while len(question_embedding) < self.max_question_token:
+        question_embedding.append(padding_token)
+
+      answer_embedding = [start_token]
+      for token in answer:
+        answer_embedding.append(self.word2vec[token])
+
+      token_mask = np.zeros(self.max_answer_token)
+      token_mask[:len(answer_embedding)] = 1
+
+      answer_embedding.append(end_token)
+      while len(answer_embedding) < self.max_answer_token:
+        answer_embedding.append(padding_token)
+
+      question_embedding = np.asarray(question_embedding)
+      answer_embedding = np.asarray(answer_embedding)
+
+      assert question_embedding.shape == (self.max_question_token, self.embedding_size)
+      assert answer_embedding.shape == (self.max_answer_token, self.embedding_size)
+
+      data_embedding.append({"question": question_embedding,
+                             "answer": answer_embedding,
+                             "answer_mask": token_mask})
+
+    self.start_token = start_token
+    self.end_token = end_token
+
+    question_embedding = []
+    answer_embedding = []
+    mask_embedding = []
+    for data_item in data_embedding:
+      question_embedding.append(data_item["question"])
+      answer_embedding.append(data_item["answer"])
+      mask_embedding.append(data_item["answer_mask"])
+    return {
+      "question": np.asarray(question_embedding),
+      "answer": np.asarray(answer_embedding),
+      "answer_mask": np.asarray(mask_embedding)
+    }
+
+  def process_data(self, train_percent):
+    """
+    process the qa pair file and split into train, valid ,test
+    :param train_percent: training percent
+    :return: dump to file
+    """
+
+    qa_pairs = json.load(open(self.qa_file, "r"))
     print("total number of data " + str(len(qa_pairs)))
 
+    clean_pairs = []
+    for qa_pair in qa_pairs:
+      question = qa_pair["question"]
+      answer = qa_pair["answer"]
+      question = self.clean_string(question)
+      answer = self.clean_string(answer)
+      clean_pair = {"question": question, "answer": answer}
+      clean_pairs.append(clean_pair)
+
+    qa_pairs = clean_pairs
     total_number = len(qa_pairs)
     train_number = int(total_number * train_percent)
     valid_number = int((total_number - train_number) / 2)
@@ -70,127 +169,26 @@ class DataProcessor(object):
     with open(self.data_dir + "test.json", "w") as f:
       json.dump(self.test_data, f, ensure_ascii=False)
 
-  def build_vocab(self, output_dir, jieba_dict, external_file=None):
+  def clean_string(self, string):
+    characters_to_remove = {"，", "。", "？", "！", "》", "、", "\r", "%", "&", "*", "…", "（",
+                            "@", "#", "￥", "）", ".", ",", " ", "?", "/", "`", "~", ":"}
 
-    vocab = {}
-    index = 0
-    vocab["[PAD]"] = index
-    index += 1
-
-    for i in range(30):
-      vocab["unused" + str(i + 1)] = index
-      index += 1
-
-    vocab["unk"] = index
-    index += 1
-    vocab["[CLS]"] = index
-    index += 1
-    vocab["[SEP]"] = index
-    index += 1
-
-    jieba.load_userdict(jieba_dict)
-
-    for qa_pair in self.data_text:
-      question = qa_pair["question"]
-      answer = qa_pair["answer"]
-      words = jieba.cut(question + answer)
-      for word in words:
-        if word not in vocab:
-          vocab[word] = index
-          index += 1
-
-    if external_file:
-      with open(external_file, "r") as f:
-        lines = f.readlines()
-        for line in lines:
-          words = jieba.cut(line)
-          for word in words:
-            if word not in vocab:
-              vocab[word] = index
-              index += 1
-
-    print("vocab size " + str(len(vocab)))
-    json.dump(vocab, open(output_dir + "vocab.json", "w"), ensure_ascii=False)
-
-  def convert_to_feature(self, data):
-    if not self.vocab:
-      raise ValueError("no vocab")
-    vocab = json.load(open(self.vocab, "r"))
-
-    question_embeddings = []
-    answer_embeddings = []
-    answer_masks = []
-    stop_labels = []
-    # min_answers = 100
-    # max_answers = 0
-    # avg_answers = 0.0
-
-    for qa_pair in data:
-      question = qa_pair["question"]
-      answer = qa_pair["answer"]
-      answer_segs = answer.split("。")
-
-      question_tokens = list(jieba.cut(question))
-      question_embedding = self.sentence_to_embedding(question_tokens, vocab)
-      question_embeddings.append(question_embedding)
-
-      padding_seg = np.zeros(self.max_sequence)
-      if len(answer_segs) > self.max_answers:
-        answer_segs = answer_segs[:self.max_answers]
-
-      answer_mask = []
-      stop_label = []
-      answer_embedding = []
-
-      for answer_seg in answer_segs:
-        answer_tokens = list(jieba.cut(answer_seg))
-        answer_embedding.append(self.sentence_to_embedding(answer_tokens, vocab))
-        answer_mask.append(1)
-        stop_label.append(0)
-
-      stop_label[-1] = 0
-
-      while len(answer_embedding) < self.max_answers:
-        answer_embedding.append(padding_seg)
-        answer_mask.append(0)
-        stop_label.append(0)
-
-      answer_embeddings.append(answer_embedding)
-      answer_masks.append(answer_mask)
-      stop_labels.append(stop_label)
-      # avg_answers += len(answer_segs)
-      # if len(answer_segs) < min_answers:
-      #   min_answers = len(answer_segs)
-      # if len(answer_segs) > max_answers:
-      #   max_answers = len(answer_segs)
-
-    # print("max answers " + str(max_answers))
-    # print("min answers " + str(min_answers))
-    # print("avg answers " + str(avg_answers / len(data)))
-    return {"question": np.asarray(question_embeddings),
-            "answer": np.asarray(answer_embeddings),
-            "answer_mask": np.asarray(answer_masks, dtype=np.float32),
-            "stop_label": np.asarray(stop_labels, dtype=np.float32)}
-
-  def sentence_to_embedding(self, tokens, vocab):
-      if len(tokens) > self.max_sequence - 2:
-         cut_tokens = tokens[:(self.max_sequence - 2)]
+    clean_string = "".join(c for c in string if c not in characters_to_remove)
+    tokens = list(jieba.cut(clean_string))
+    clean_tokens = []
+    for token in tokens:
+      if self.contain_digit(token):
+        clean_tokens.append("<number>")
       else:
-        cut_tokens = tokens
+        clean_tokens.append(token)
+    # print(len(clean_tokens))
+    return clean_tokens
 
-      embedding = [vocab["[CLS]"]]
-      for token in cut_tokens:
-        if token in vocab:
-          embedding.append(vocab[token])
-        else:
-          embedding.append(vocab["unk"])
-      embedding.append(vocab["[SEP]"])
-      while len(embedding) < self.max_sequence:
-        embedding.append(vocab["[PAD]"])
-      return embedding
+  @staticmethod
+  def contain_digit(phrase):
+    return any(c.isdigit() for c in phrase)
 
 
 if __name__ == "__main__":
-
-  data_processor = DataProcessor("./data/diabetes.json", data_dir="./data/", vocab="./data/vocab.json")
-  data_processor.build_vocab("./data/", "./data/dict.txt", external_file="./data/diabetes_knowledge.txt")
+  data_processor = DataProcessor("./data/QA_data/varicocele/", "./data/QA_data/varicocele/varicocele.json",
+                                 word2vec="./data/word2vec/varicocele")

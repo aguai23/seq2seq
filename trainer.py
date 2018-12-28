@@ -3,9 +3,12 @@ import logging
 import json
 from model.knowledge_matcher import KnowledgeMatcher
 from data_processor import DataProcessor
+from model.seq2seq import Seq2Seq
 from knowledge_tree import KnowledgeTree
 import numpy as np
-
+from scipy import spatial
+from evaluator import Evaluator
+import jieba
 logging.basicConfig(level=logging.INFO, format='%(asctime)s %(message)s')
 
 
@@ -30,12 +33,6 @@ class Trainer(object):
     self.verify_epoch = verify_epoch
 
     self.output_path = output_path
-
-    self.vocab = self.network.vocab
-
-    self.decode_vocab = {}
-    for key, value in self.vocab.items():
-      self.decode_vocab[value] = key
 
     if optimizer == "momentum":
 
@@ -65,7 +62,6 @@ class Trainer(object):
     question = train_data["question"]
     answer = train_data["answer"]
     answer_mask = train_data["answer_mask"]
-    stop_label = train_data["stop_label"]
 
     train_samples = question.shape[0]
     print("total training numbers " + str(train_samples))
@@ -73,6 +69,8 @@ class Trainer(object):
     step_size = int(train_samples / self.batch_size)
 
     init = tf.global_variables_initializer()
+
+    evaluator = Evaluator()
 
     with tf.Session() as sess:
 
@@ -95,22 +93,21 @@ class Trainer(object):
           start_index = self.batch_size * step
           end_index = self.batch_size * (step + 1)
 
-          _, loss, answers, labels = sess.run([self.optimizer,
-                              self.network.cost, self.network.output_logits, self.network.output_labels],
-                              feed_dict={
-                               self.network.question: question[start_index: end_index],
-                               self.network.answer: answer[start_index: end_index],
-                               self.network.answer_mask: answer_mask[
-                                                         start_index: end_index],
-                               self.network.stop_label: stop_label[start_index: end_index]
-                             })
+          _, loss, answers = sess.run([self.optimizer,
+                                       self.network.cost, self.network.outputs],
+                                      feed_dict={
+                                        self.network.question: question[start_index: end_index],
+                                        self.network.answer: answer[start_index: end_index],
+                                        self.network.answer_mask: answer_mask[
+                                                                  start_index: end_index]
+                                      })
 
           if step % display_step == 0:
             logging.info("epoch {:}, step {:}, Minibatch Loss={:.4f}".format(epoch,
                                                                              step,
                                                                              loss))
-            print(np.argmax(answers[0][0], axis=-1))
-            print(np.argmax(labels[0][0], axis=-1))
+            # decode_answers = self.decode_answer(answers)
+            # print(decode_answers[0])
 
         if epoch % save_epoch == 0:
           saver = tf.train.Saver()
@@ -123,52 +120,54 @@ class Trainer(object):
           valid_question = valid_data["question"]
           valid_answer = valid_data["answer"]
           valid_answer_mask = valid_data["answer_mask"]
-          valid_stop_label = valid_data["stop_label"]
+
+          raw_valid_data = data_processor.get_raw_valid()
 
           valid_step = int(len(valid_question) / self.batch_size)
           total_loss = 0.0
-          for step in range(1):
+          for step in range(valid_step):
             start_index = self.batch_size * step
             end_index = self.batch_size * (step + 1)
 
-            loss, answers, stop_masks = sess.run([self.network.cost, self.network.answers,
-                                                  self.network.stop_masks],
-                                                 feed_dict={
-                                                   self.network.question: valid_question[start_index: end_index],
-                                                   self.network.answer: valid_answer[start_index: end_index],
-                                                   self.network.answer_mask: valid_answer_mask[start_index: end_index],
-                                                   self.network.stop_label: valid_stop_label[start_index: end_index]
-                                                 })
-            print(loss)
+            loss, outputs = sess.run([self.network.cost, self.network.infer_outputs],
+                                     feed_dict={
+                                       self.network.question: valid_question[start_index: end_index],
+                                       self.network.answer: valid_answer[start_index: end_index],
+                                       self.network.answer_mask: valid_answer_mask[start_index: end_index]
+                                     })
+            decoded_answers = self.decode_answer(outputs)
+
+            raw_valid_seg = raw_valid_data[start_index: end_index]
+            for decoded_answer, raw_valid in zip(decoded_answers, raw_valid_seg):
+              blue_score = evaluator.calculate_bleu(decoded_answer, raw_valid["answer"])
             total_loss += loss
-            decoded_answers = self.decode_answer(answers, stop_masks)
-            print(decoded_answers)
           logging.info("loss on valid data " + str(total_loss / valid_step))
+          avg_bleu = evaluator.average_bleu()
+          logging.info("bleu score " + str(avg_bleu))
 
-  def decode_answer(self, answers, stop_masks):
+  def decode_answer(self, answers):
 
-    decoded_answers = []
+    decode_answers = []
 
-    for (answer, stop_mask) in zip(answers, stop_masks):
-      decoded_sentence = ""
-      for answer_seg, sentence_mask in zip(answer, stop_mask):
-        for word in answer_seg:
-          decoded_sentence += self.decode_vocab[word]
-          if self.decode_vocab[word] == "[SEP]":
-            break
-        decoded_sentence += ","
-        if sentence_mask < 0.5:
+    for answer in answers:
+      decode_answer = []
+      for token in answer:
+        decode_token = self.data_provider.word2vec.most_similar(positive=[token], negative=[], topn=1)
+
+        top_sim = decode_token[0][1]
+        end_sim = 1 - spatial.distance.cosine(token, data_processor.end_token)
+        if end_sim > top_sim:
           break
-      decoded_answers.append(decoded_sentence)
 
-    return decoded_answers
+        decode_answer.append(decode_token[0][0])
+      decode_answers.append(decode_answer)
+
+    return decode_answers
 
 
 if __name__ == "__main__":
-  knowledge_tree = KnowledgeTree("./data/diabetes_knowledge.txt", "糖尿病", "./data/dict.txt")
-  vocab = json.load(open("./data/vocab.json"))
-  knowledge_tree.extract_embedding(vocab)
-  knowledge_matcher = KnowledgeMatcher(knowledge_tree, vocab)
-  data_processor = DataProcessor("./data/diabetes.json", data_dir="./data/", vocab="./data/vocab.json")
-  trainer = Trainer(knowledge_matcher, data_processor)
-  trainer.train(train_epoch=10, restore=True)
+  data_processor = DataProcessor("./data/QA_data/varicocele/", "./data/QA_data/varicocele/varicocele.json",
+                                 word2vec="./data/word2vec/varicocele")
+  model = Seq2Seq(data_processor.start_token)
+  trainer = Trainer(model, data_processor)
+  trainer.train(train_epoch=100, save_epoch=10, display_step=50)

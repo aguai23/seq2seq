@@ -1,16 +1,10 @@
 import tensorflow as tf
 import logging
-import json
-from model.knowledge_matcher import KnowledgeMatcher
 from data_processor import DataProcessor
 from model.seq2seq import Seq2Seq
-from knowledge_tree import KnowledgeTree
-import numpy as np
-from scipy import spatial
-from evaluator import Evaluator
-import jieba
+from evaluation.evaluator import Evaluator
 from sklearn.utils import shuffle
-
+import math
 logging.basicConfig(level=logging.INFO, format='%(asctime)s %(message)s')
 
 
@@ -167,26 +161,35 @@ class Trainer(object):
             decoded_answers = self.decode_answer(outputs)
 
             raw_valid_seg = raw_valid_data[start_index: end_index]
-
+            decoded_labels = self.decode_answer(valid_answer_label[start_index: end_index])
             if step == 0 or step == 5:
              print("---------question----------")
              print("".join(raw_valid_data[start_index]["question"]))
              print("--------model output------------")
              print("".join(decoded_answers[0]))
              print("-------ground truth----------")
-             decoded_label = self.decode_answer(valid_answer_label[start_index: end_index])
-             print("".join(decoded_label[0]))
+             print("".join(raw_valid_data[start_index]["answer"]))
 
-            for decoded_answer, raw_valid in zip(decoded_answers, raw_valid_seg):
+            for decoded_answer, raw_valid, decoded_label in zip(decoded_answers, raw_valid_seg, decoded_labels):
+
               evaluator.calculate_bleu(decoded_answer, raw_valid["answer"])
+              evaluator.calculate_rouge(decoded_answer, raw_valid["answer"])
+              evaluator.add_cider_pair((decoded_answer, decoded_label))
+
             total_loss += loss
           logging.info("loss on valid data " + str(total_loss / valid_step))
+          perplexity = math.exp(total_loss / valid_step)
           avg_bleu_1, avg_bleu_2, avg_bleu_3, avg_bleu_4 = evaluator.average_bleu()
+          avg_rouge = evaluator.avg_rouge()
+          avg_cider = evaluator.avg_cider()
 
           logging.info("bleu score 1 " + str(avg_bleu_1))
           logging.info("bleu score 2 " + str(avg_bleu_2))
           logging.info("bleu score 3 " + str(avg_bleu_3))
           logging.info("bleu score 4 " + str(avg_bleu_4))
+          logging.info("rouge score " + str(avg_rouge))
+          logging.info("cider score " + str(avg_cider))
+          logging.info("perplexity " + str(perplexity))
 
           valid_summary = tf.Summary()
           valid_summary.value.add(tag="valid_loss", simple_value=(total_loss / valid_step))
@@ -194,6 +197,9 @@ class Trainer(object):
           valid_summary.value.add(tag="bleu_2", simple_value=avg_bleu_2)
           valid_summary.value.add(tag="bleu_3", simple_value=avg_bleu_3)
           valid_summary.value.add(tag="bleu_4", simple_value=avg_bleu_4)
+          valid_summary.value.add(tag="rouge", simple_value=avg_rouge)
+          valid_summary.value.add(tag="cider", simple_value=avg_cider)
+          valid_summary.value.add(tag="perplexity", simple_value=perplexity)
           summary_writer.add_summary(valid_summary, epoch)
           summary_writer.flush()
 
@@ -217,7 +223,9 @@ class Trainer(object):
 
 
 if __name__ == "__main__":
-  data_processor = DataProcessor("./data/QA_data/varicocele/", "./data/QA_data/varicocele/varicocele.json",
+  data_processor = DataProcessor("./data/QA_data/varicocele/", train_file="./data/QA_data/varicocele/train.json",
+                                 valid_file="./data/QA_data/varicocele/valid.json",
+                                 test_file="./data/QA_data/varicocele/valid.json",
                                  word2vec="./data/word2vec/varicocele")
   model = Seq2Seq(data_processor.start_token, data_processor.vocab_embedding)
   trainer = Trainer(model, data_processor, learning_rate=5e-3, batch_size=8)

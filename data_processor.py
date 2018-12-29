@@ -61,9 +61,12 @@ class DataProcessor(object):
     self.raw_test_data = self.test_data
 
     self.encode_vocab, self.decode_vocab = self.build_vocab()
-    self.train_data = self.convert_to_embedding(self.train_data)
-    self.valid_data = self.convert_to_embedding(self.valid_data)
-    self.test_data = self.convert_to_embedding(self.test_data)
+    # self.train_data = self.convert_to_embedding(self.train_data)
+    # self.valid_data = self.convert_to_embedding(self.valid_data)
+    # self.test_data = self.convert_to_embedding(self.test_data)
+    self.train_data = self.convert_to_id(self.train_data)
+    self.valid_data = self.convert_to_id(self.valid_data)
+    self.test_data = self.convert_to_id(self.test_data)
 
     self.vocab_embedding = self.build_vocab_embedding()
     print(self.vocab_embedding.shape)
@@ -109,6 +112,11 @@ class DataProcessor(object):
     return self.raw_valid_data
 
   def convert_to_embedding(self, data):
+    """
+    convert question and answer data to embeddings
+    :param data: list of qa pairs
+    :return:
+    """
     padding_token = np.zeros(self.embedding_size)
     start_token = np.zeros(self.embedding_size)
     end_token = np.zeros(self.embedding_size)
@@ -179,6 +187,67 @@ class DataProcessor(object):
       "answer": np.asarray(answer_embedding),
       "answer_mask": np.asarray(mask_embedding),
       "answer_label": np.asarray(label_embedding)
+    }
+
+  def convert_to_id(self, data):
+    """
+    convert to id
+    :param data:
+    :return:
+    """
+    question_ids = []
+    answer_ids = []
+    answer_masks = []
+    answer_labels = []
+    self.start_token = 2
+    for qa_pair in data:
+
+      question = qa_pair["question"]
+      answer = qa_pair["answer"]
+
+      if len(question) > self.max_question_token:
+        question = question[:self.max_question_token]
+
+      if len(answer) > self.max_answer_token - 2:
+        answer = answer[:self.max_answer_token - 2]
+
+      question_id = []
+      for token in question:
+        question_id.append(self.encode_vocab[token])
+
+      while len(question_id) < self.max_question_token:
+        question_id.append(0)
+
+      answer_id = []
+      answer_label = []
+
+      answer_id.append(self.encode_vocab["<start>"])
+      for token in answer:
+        answer_id.append(self.encode_vocab[token])
+        answer_label.append(self.encode_vocab[token])
+
+      answer_mask = np.zeros(self.max_answer_token)
+      answer_mask[:len(answer_id)] = 1
+
+      answer_id.append(self.encode_vocab["<end>"])
+      answer_label.append(self.encode_vocab["<end>"])
+
+      while len(answer_id) < self.max_answer_token:
+        answer_id.append(0)
+
+      while len(answer_label) < self.max_answer_token:
+        answer_label.append(0)
+
+      question_ids.append(question_id)
+      answer_ids.append(answer_id)
+      answer_masks.append(answer_mask)
+      answer_labels.append(answer_label)
+
+    return {
+      "question": np.asarray(question_ids),
+      "answer": np.asarray(answer_ids),
+      "answer_mask": np.asarray(answer_masks),
+      "answer_label": np.asarray(answer_labels)
     }
 
   def process_data(self, train_percent):

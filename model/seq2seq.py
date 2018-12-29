@@ -17,13 +17,12 @@ class Seq2Seq(object):
 
     self.max_answer_token = max_answer_token
 
-    self.vocab_embedding = tf.Variable(initial_value=vocab_embedding, trainable=False, name="vocab_embedding",
-                                       expected_shape=[self.vocab_size, self.embedding_size], dtype=tf.float32)
+    self.vocab_embedding = tf.get_variable("vocab_embedding", [self.vocab_size, self.embedding_size], dtype=tf.float32)
 
-    self.start_token = tf.convert_to_tensor(start_token, dtype=tf.float32)
+    self.start_token = tf.convert_to_tensor(start_token, dtype=tf.int32)
 
-    self.question = tf.placeholder(shape=[None, self.max_question_token, self.embedding_size], dtype=tf.float32)
-    self.answer = tf.placeholder(shape=[None, self.max_answer_token, self.embedding_size], dtype=tf.float32)
+    self.question = tf.placeholder(shape=[None, self.max_question_token], dtype=tf.int32)
+    self.answer = tf.placeholder(shape=[None, self.max_answer_token], dtype=tf.int32)
     self.answer_mask = tf.placeholder(shape=[None, self.max_answer_token], dtype=tf.float32)
     self.answer_label = tf.placeholder(tf.int32, shape=[None, self.max_answer_token])
 
@@ -48,11 +47,11 @@ class Seq2Seq(object):
     """
 
     with tf.variable_scope("encoder"):
-
+      question_embedding = tf.nn.embedding_lookup(self.vocab_embedding, question)
       encode_forward_cell = tf.nn.rnn_cell.LSTMCell(self.hidden_size, name="encoder_forward_cell", reuse=tf.AUTO_REUSE)
       encoder_backward_cell = tf.nn.rnn_cell.LSTMCell(self.hidden_size, name="encoder_backward_cell", reuse=tf.AUTO_REUSE)
 
-      _, context = tf.nn.bidirectional_dynamic_rnn(encode_forward_cell, encoder_backward_cell, question, dtype=tf.float32)
+      _, context = tf.nn.bidirectional_dynamic_rnn(encode_forward_cell, encoder_backward_cell, question_embedding, dtype=tf.float32)
 
       context = tf.add(context[0], context[1])
 
@@ -62,9 +61,10 @@ class Seq2Seq(object):
 
     with tf.variable_scope("decoder"):
 
+      answer_embedding = tf.nn.embedding_lookup(self.vocab_embedding, answer)
       decoder_cell = tf.nn.rnn_cell.LSTMCell(self.hidden_size, name="decoder_cell", reuse=tf.AUTO_REUSE)
       state = tf.nn.rnn_cell.LSTMStateTuple(context[0], context[1])
-      answer_tokens = tf.split(answer, self.max_answer_token, axis=1)
+      answer_tokens = tf.split(answer_embedding, self.max_answer_token, axis=1)
 
       outputs = []
       for i in range(self.max_answer_token):
@@ -85,10 +85,11 @@ class Seq2Seq(object):
       state = tf.nn.rnn_cell.LSTMStateTuple(context[0], context[1])
 
       batch_size = tf.shape(self.answer)[0]
-      initial_input = tf.tile(tf.expand_dims(self.start_token, axis=0), [batch_size, 1])
+      print(self.start_token)
+      initial_input = tf.tile(tf.expand_dims(self.start_token, axis=0), [batch_size])
       # initial_input = tf.expand_dims(initial_input, axis=1)
       # print(initial_input)
-      input_seq = initial_input
+      input_seq = tf.nn.embedding_lookup(self.vocab_embedding, initial_input)
 
       outputs = []
 

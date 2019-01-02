@@ -229,4 +229,4 @@ if __name__ == "__main__":
                                  word2vec="./data/word2vec/varicocele")
   model = Seq2Seq(data_processor.start_token, data_processor.vocab_embedding)
   trainer = Trainer(model, data_processor, learning_rate=5e-3, batch_size=8)
-  trainer.train(train_epoch=100, save_epoch=10, display_step=100, restore=True)
+  trainer.train(train_epoch=100, save_epoch=10, display_step=100, restore=False)

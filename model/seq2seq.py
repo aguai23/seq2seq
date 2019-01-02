@@ -51,19 +51,19 @@ class Seq2Seq(object):
       encode_forward_cell = tf.nn.rnn_cell.LSTMCell(self.hidden_size, name="encoder_forward_cell", reuse=tf.AUTO_REUSE)
       encoder_backward_cell = tf.nn.rnn_cell.LSTMCell(self.hidden_size, name="encoder_backward_cell", reuse=tf.AUTO_REUSE)
 
-      _, context = tf.nn.bidirectional_dynamic_rnn(encode_forward_cell, encoder_backward_cell, question_embedding, dtype=tf.float32)
-
-      context = tf.add(context[0], context[1])
-
+      _, context = tf.nn.bidirectional_dynamic_rnn(encode_forward_cell, encoder_backward_cell,
+                                                   question_embedding, dtype=tf.float32)
+      context_c = tf.add(context[0].c, context[1].c)
+      context_h = tf.add(context[0].h, context[1].h)
+      context = tf.nn.rnn_cell.LSTMStateTuple(context_c, context_h)
     return context
 
   def decode_train(self, answer, context):
 
     with tf.variable_scope("decoder"):
-
       answer_embedding = tf.nn.embedding_lookup(self.vocab_embedding, answer)
       decoder_cell = tf.nn.rnn_cell.LSTMCell(self.hidden_size, name="decoder_cell", reuse=tf.AUTO_REUSE)
-      state = tf.nn.rnn_cell.LSTMStateTuple(context[0], context[1])
+      state = context
       answer_tokens = tf.split(answer_embedding, self.max_answer_token, axis=1)
 
       outputs = []
@@ -78,33 +78,122 @@ class Seq2Seq(object):
 
     return outputs
 
-  def decode_infer(self, context):
+  def decode_infer(self, context, beam_width=3):
 
     with tf.variable_scope("decoder"):
       decoder_cell = tf.nn.rnn_cell.LSTMCell(self.hidden_size, name="decoder_cell", reuse=tf.AUTO_REUSE)
       state = tf.nn.rnn_cell.LSTMStateTuple(context[0], context[1])
 
       batch_size = tf.shape(self.answer)[0]
-      print(self.start_token)
       initial_input = tf.tile(tf.expand_dims(self.start_token, axis=0), [batch_size])
-      # initial_input = tf.expand_dims(initial_input, axis=1)
-      # print(initial_input)
-      input_seq = tf.nn.embedding_lookup(self.vocab_embedding, initial_input)
 
       outputs = []
+      beam_outputs = []
+
+      for i in range(beam_width):
+        beam_outputs.append((initial_input,
+                             state,
+                             tf.tile(tf.constant([1.0], shape=[1], dtype=tf.float32), [batch_size]),
+                             None))
 
       for i in range(self.max_answer_token):
         # print(input_seq)
+        beam_scores = None
+        beam_indices = None
+        beam_states_c = None
+        beam_states_h = None
+        beam_pre_outputs = None
 
-        output, state = decoder_cell(input_seq, state)
-        output = tf.layers.dense(output, self.vocab_size, activation=None, reuse=tf.AUTO_REUSE, name="to_vector")
-        output = tf.argmax(tf.nn.softmax(output, axis=-1), axis=-1)
+        for beam_output in beam_outputs:
+          inputs = beam_output[0]
+          state = beam_output[1]
+          score = beam_output[2]
+          previous_output = beam_output[3]
+          inputs = tf.nn.embedding_lookup(self.vocab_embedding, inputs)
+          output, state = decoder_cell(inputs, state)
+          output = tf.layers.dense(output, self.vocab_size, activation=None, reuse=tf.AUTO_REUSE, name="to_vector")
+          output = tf.nn.softmax(output, axis=-1)
+          values, indices = tf.math.top_k(output, k=beam_width)
+          values = tf.multiply(values, tf.expand_dims(score, axis=1))
+
+          # concat score
+          if beam_scores is None:
+            beam_scores = values
+          else:
+            beam_scores = tf.concat([beam_scores, values], axis=1)
+
+          # concat index
+          if beam_indices is None:
+            beam_indices = indices
+          else:
+            beam_indices = tf.concat([beam_indices, indices], axis=1)
+
+          # concat state
+          if beam_states_c is None:
+            beam_states_c = tf.tile(tf.expand_dims(state.c, axis=1), [1, batch_size, 1])
+          else:
+            beam_states_c = tf.concat([beam_states_c,
+                                       tf.tile(tf.expand_dims(state.c, axis=1), [1, batch_size, 1])], axis=1)
+
+          if beam_states_h is None:
+            beam_states_h = tf.tile(tf.expand_dims(state.h, axis=1), [1, batch_size, 1])
+          else:
+            beam_states_h = tf.concat([beam_states_h,
+                                       tf.tile(tf.expand_dims(state.h, axis=1), [1, batch_size, 1])], axis=1)
+
+          if previous_output is not None:
+            if beam_pre_outputs is None:
+              beam_pre_outputs = tf.tile(tf.expand_dims(previous_output, axis=1), [1, beam_width, 1])
+            else:
+              beam_pre_outputs = tf.concat([beam_pre_outputs,
+                                            tf.tile(tf.expand_dims(previous_output, axis=1), [1, beam_width, 1])],
+                                           axis=1)
+
+        values, indices = tf.math.top_k(beam_scores, k=beam_width)
+        word_indices = tf.batch_gather(beam_indices, indices)
+        beam_states_c = tf.batch_gather(beam_states_c, indices)
+        beam_states_h = tf.batch_gather(beam_states_h, indices)
+        # print(indices)
+        # print(beam_pre_outputs)
+        if beam_pre_outputs is not None:
+          beam_pre_outputs = tf.batch_gather(beam_pre_outputs, indices)
+          beam_pre_outputs = tf.squeeze(tf.split(beam_pre_outputs, beam_width, axis=1), axis=2)
+        # print(values)
+        # print(word_indices)
+        # print(beam_states_c)
+        # print(beam_states_h)
+
+        beam_outputs = []
+        scores = tf.split(values, beam_width, axis=1)
+        outputs = tf.split(word_indices, beam_width, axis=1)
+        beam_states_c = tf.split(beam_states_c, beam_width, axis=1)
+        beam_states_h = tf.split(beam_states_h, beam_width, axis=1)
+
+        # print(outputs)
+        # print(beam_states_c)
+        # print(scores)
+        # print(outputs[0])
+        for i in range(beam_width):
+          score = tf.squeeze(scores[i], axis=1)
+          state_c = tf.squeeze(beam_states_c[i], axis=1)
+          state_h = tf.squeeze(beam_states_h[i], axis=1)
+          if beam_pre_outputs is not None:
+            beam_outputs.append((tf.squeeze(outputs[i], axis=1),
+                                tf.nn.rnn_cell.LSTMStateTuple(state_c, state_h),
+                                score,
+                                tf.concat([beam_pre_outputs[i], outputs[i]], axis=1)))
+          else:
+            beam_outputs.append((tf.squeeze(outputs[i], axis=1),
+                                 tf.nn.rnn_cell.LSTMStateTuple(state_c, state_h),
+                                 score,
+                                 outputs[i]))
+        # print(beam_outputs[0][3])
         # append to output
-        outputs.append(output)
-        input_seq = tf.nn.embedding_lookup(self.vocab_embedding, output)
-      outputs = tf.convert_to_tensor(outputs, dtype=tf.float32)
-      outputs = tf.transpose(outputs, [1, 0])
-    return outputs
+      #   outputs.append(output)
+      #   input_seq = tf.nn.embedding_lookup(self.vocab_embedding, output)
+      # outputs = tf.convert_to_tensor(outputs, dtype=tf.float32)
+      # outputs = tf.transpose(outputs, [1, 0])
+    return beam_outputs[0][3]
 
   def build_cost(self, outputs):
     # target_label = tf.one_hot(self.answer_label, depth=self.vocab_size, dtype=tf.float32)

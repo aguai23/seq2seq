@@ -196,6 +196,7 @@ class DataProcessor(object):
     :return:
     """
     question_ids = []
+    question_masks = []
     answer_ids = []
     answer_masks = []
     answer_labels = []
@@ -215,6 +216,8 @@ class DataProcessor(object):
       for token in question:
         question_id.append(self.encode_vocab[token])
 
+      question_mask = np.zeros(self.max_question_token)
+      question_mask[:len(question_id)] = 1
       while len(question_id) < self.max_question_token:
         question_id.append(0)
 
@@ -239,12 +242,14 @@ class DataProcessor(object):
         answer_label.append(0)
 
       question_ids.append(question_id)
+      question_masks.append(question_mask)
       answer_ids.append(answer_id)
       answer_masks.append(answer_mask)
       answer_labels.append(answer_label)
 
     return {
       "question": np.asarray(question_ids),
+      "question_mask": np.asarray(question_masks),
       "answer": np.asarray(answer_ids),
       "answer_mask": np.asarray(answer_masks),
       "answer_label": np.asarray(answer_labels)

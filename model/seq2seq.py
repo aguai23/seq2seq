@@ -5,7 +5,8 @@ from data_processor import DataProcessor
 
 class Seq2Seq(object):
 
-  def __init__(self, start_token, vocab_embedding, embedding_size=100, hidden_size=256, max_question_token=30, max_answer_token=100):
+  def __init__(self, start_token, vocab_embedding, embedding_size=100, hidden_size=256, max_question_token=30,
+               max_answer_token=100):
 
     self.embedding_size = embedding_size
 
@@ -22,14 +23,15 @@ class Seq2Seq(object):
     self.start_token = tf.convert_to_tensor(start_token, dtype=tf.int32)
 
     self.question = tf.placeholder(shape=[None, self.max_question_token], dtype=tf.int32)
+    self.question_mask = tf.placeholder(shape=[None, self.max_question_token], dtype=tf.float32)
     self.answer = tf.placeholder(shape=[None, self.max_answer_token], dtype=tf.int32)
     self.answer_mask = tf.placeholder(shape=[None, self.max_answer_token], dtype=tf.float32)
     self.answer_label = tf.placeholder(tf.int32, shape=[None, self.max_answer_token])
 
-    context = self.encode(self.question)
-    self.outputs = self.decode_train(self.answer, context)
+    context, encoding_states = self.encode(self.question)
+    self.outputs = self.decode_train(self.answer, context, encoding_states)
     self.output_tokens = tf.argmax(tf.nn.softmax(self.outputs, axis=-1), axis=-1)
-    self.infer_outputs = self.decode_infer(context)
+    self.infer_outputs = self.decode_infer(context, encoding_states)
     print(self.infer_outputs)
     # print(outputs)
 
@@ -49,16 +51,45 @@ class Seq2Seq(object):
     with tf.variable_scope("encoder"):
       question_embedding = tf.nn.embedding_lookup(self.vocab_embedding, question)
       encode_forward_cell = tf.nn.rnn_cell.LSTMCell(self.hidden_size, name="encoder_forward_cell", reuse=tf.AUTO_REUSE)
-      encoder_backward_cell = tf.nn.rnn_cell.LSTMCell(self.hidden_size, name="encoder_backward_cell", reuse=tf.AUTO_REUSE)
+      encoder_backward_cell = tf.nn.rnn_cell.LSTMCell(self.hidden_size, name="encoder_backward_cell",
+                                                      reuse=tf.AUTO_REUSE)
 
-      _, context = tf.nn.bidirectional_dynamic_rnn(encode_forward_cell, encoder_backward_cell,
-                                                   question_embedding, dtype=tf.float32)
+      encoding_states, context = tf.nn.bidirectional_dynamic_rnn(encode_forward_cell, encoder_backward_cell,
+                                                                 question_embedding, dtype=tf.float32)
+
+      encoding_states = tf.add(encoding_states[0], encoding_states[1])
+      encoding_states = tf.multiply(encoding_states, tf.expand_dims(self.question_mask, axis=2))
+      encoding_states = tf.reduce_sum(encoding_states, axis=1)
+      # print(encoding_states)
       context_c = tf.add(context[0].c, context[1].c)
       context_h = tf.add(context[0].h, context[1].h)
+      context_c = tf.add(context_c, encoding_states)
+      context_h = tf.add(context_h, encoding_states)
       context = tf.nn.rnn_cell.LSTMStateTuple(context_c, context_h)
-    return context
+    return context, encoding_states
 
-  def decode_train(self, answer, context):
+  def attention(self, encoding_states, hidden_state):
+    """
+    word level attention
+    :param encoding_states: the output of encoding network
+    :param hidden_state: hidden state of one decoding timestamp
+    :return:
+    """
+
+    hidden_state = tf.add(hidden_state.c, hidden_state.h)
+    hidden_state = tf.expand_dims(hidden_state, axis=1)
+    hidden_state = tf.tile(hidden_state, [1, self.max_question_token, 1])
+    attention_weight = tf.multiply(hidden_state, encoding_states)
+    attention_weight = tf.reduce_sum(attention_weight, axis=-1)
+    attention_weight = tf.multiply(attention_weight, self.question_mask)
+    attention_weight = tf.nn.softmax(attention_weight, axis=-1)
+
+    attended_state = tf.multiply(encoding_states, tf.expand_dims(attention_weight, axis=2))
+    attended_state = tf.multiply(attended_state, tf.expand_dims(self.question_mask, axis=2))
+    attended_state = tf.reduce_sum(attended_state, axis=1)
+    return attended_state
+
+  def decode_train(self, answer, context, encoding_states):
 
     with tf.variable_scope("decoder"):
       answer_embedding = tf.nn.embedding_lookup(self.vocab_embedding, answer)
@@ -78,16 +109,15 @@ class Seq2Seq(object):
 
     return outputs
 
-  def decode_infer(self, context, beam_width=3):
+  def decode_infer(self, context, encoding_states, beam_width=3):
 
     with tf.variable_scope("decoder"):
       decoder_cell = tf.nn.rnn_cell.LSTMCell(self.hidden_size, name="decoder_cell", reuse=tf.AUTO_REUSE)
-      state = tf.nn.rnn_cell.LSTMStateTuple(context[0], context[1])
+      state = context
 
       batch_size = tf.shape(self.answer)[0]
       initial_input = tf.tile(tf.expand_dims(self.start_token, axis=0), [batch_size])
 
-      outputs = []
       beam_outputs = []
 
       for i in range(beam_width):
@@ -110,6 +140,7 @@ class Seq2Seq(object):
           score = beam_output[2]
           previous_output = beam_output[3]
           inputs = tf.nn.embedding_lookup(self.vocab_embedding, inputs)
+
           output, state = decoder_cell(inputs, state)
           output = tf.layers.dense(output, self.vocab_size, activation=None, reuse=tf.AUTO_REUSE, name="to_vector")
           output = tf.nn.softmax(output, axis=-1)
@@ -179,9 +210,9 @@ class Seq2Seq(object):
           state_h = tf.squeeze(beam_states_h[i], axis=1)
           if beam_pre_outputs is not None:
             beam_outputs.append((tf.squeeze(outputs[i], axis=1),
-                                tf.nn.rnn_cell.LSTMStateTuple(state_c, state_h),
-                                score,
-                                tf.concat([beam_pre_outputs[i], outputs[i]], axis=1)))
+                                 tf.nn.rnn_cell.LSTMStateTuple(state_c, state_h),
+                                 score,
+                                 tf.concat([beam_pre_outputs[i], outputs[i]], axis=1)))
           else:
             beam_outputs.append((tf.squeeze(outputs[i], axis=1),
                                  tf.nn.rnn_cell.LSTMStateTuple(state_c, state_h),

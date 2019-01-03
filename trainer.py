@@ -11,7 +11,7 @@ logging.basicConfig(level=logging.INFO, format='%(asctime)s %(message)s')
 class Trainer(object):
 
   def __init__(self, network, data_provider, batch_size=16, optimizer="adam", learning_rate=5e-5,
-               decay_rate=0.9, decay_step=1000, momentum=0.9, verify_epoch=1, output_path="./saved_model/"):
+               decay_rate=1, decay_step=1000, momentum=0.9, verify_epoch=1, output_path="./saved_model/"):
     # network class
     self.network = network
 
@@ -56,6 +56,7 @@ class Trainer(object):
 
     train_data = self.data_provider.get_train_data()
     question = train_data["question"]
+    question_mask = train_data["question_mask"]
     answer = train_data["answer"]
     answer_mask = train_data["answer_mask"]
     answer_label = train_data["answer_label"]
@@ -96,6 +97,7 @@ class Trainer(object):
           _ = sess.run(self.optimizer,
                        feed_dict={
                          self.network.question: question[start_index: end_index],
+                         self.network.question_mask: question_mask[start_index: end_index],
                          self.network.answer: answer[start_index: end_index],
                          self.network.answer_mask: answer_mask[
                                                    start_index: end_index],
@@ -108,6 +110,7 @@ class Trainer(object):
                                                      self.network.output_tokens],
                                                     feed_dict={
                                                       self.network.question: question[start_index: end_index],
+                                                      self.network.question_mask: question_mask[start_index: end_index],
                                                       self.network.answer: answer[start_index: end_index],
                                                       self.network.answer_mask: answer_mask[
                                                                                 start_index: end_index],
@@ -139,6 +142,7 @@ class Trainer(object):
 
           valid_data = data_processor.get_valid_data()
           valid_question = valid_data["question"]
+          valid_question_mask = valid_data["question_mask"]
           valid_answer = valid_data["answer"]
           valid_answer_mask = valid_data["answer_mask"]
           valid_answer_label = valid_data["answer_label"]
@@ -154,6 +158,7 @@ class Trainer(object):
             loss, outputs = sess.run([self.network.cost, self.network.infer_outputs],
                                      feed_dict={
                                        self.network.question: valid_question[start_index: end_index],
+                                       self.network.question_mask: valid_question_mask[start_index: end_index],
                                        self.network.answer: valid_answer[start_index: end_index],
                                        self.network.answer_mask: valid_answer_mask[start_index: end_index],
                                        self.network.answer_label: valid_answer_label[start_index: end_index]
@@ -228,5 +233,5 @@ if __name__ == "__main__":
                                  test_file="./data/QA_data/varicocele/valid.json",
                                  word2vec="./data/word2vec/varicocele")
   model = Seq2Seq(data_processor.start_token, data_processor.vocab_embedding)
-  trainer = Trainer(model, data_processor, learning_rate=5e-3, batch_size=8)
+  trainer = Trainer(model, data_processor, learning_rate=1e-3, batch_size=8)
   trainer.train(train_epoch=100, save_epoch=10, display_step=100, restore=False)
